@@ -55,23 +55,27 @@ parser.add_argument('--batch-size', type=int, default=8)
 parser.add_argument('--num-workers', type=int, default=16)
 parser.add_argument('--epoch-start', type=int, default=0)
 parser.add_argument('--epoch-end', type=int)
-parser.add_argument('--log-train-loss-interval', type=int, default=10)
+parser.add_argument('--log-train-loss-interval', type=int, default=1000)
 parser.add_argument('--log-train-images-interval', type=int, default=2000)
 parser.add_argument('--log-valid-interval', type=int, default=5000)
 parser.add_argument('--checkpoint-interval', type=int, default=5000)
 args = parser.parse_args()
 
-args.log_train_loss_interval = 1000
+args.log_train_loss_interval = 20
+# args.log_train_loss_interval = 100
 args.log_train_images_interval = 1000
 args.log_valid_interval = 1000
-args.checkpoint_interval = 5000
+args.checkpoint_interval = 1000
+
+
+
 
 args.dataset_name = 'videomatte240k'
 args.model_backbone = 'resnet50'
 args.model_name = '/home/sp/zhaojl/BackgroundMattingV2-master/model/PyTorch/'
-args.epoch_end = 1
+args.epoch_end = 1000
 args.batch_size = 2
-args.num_workers = 2
+args.num_workers = 32
 # distributed_num_gpus = 2
 args.device = 'cuda:7'
 # distributed_num_gpus = torch.cuda.device_count()
@@ -124,15 +128,16 @@ def train():
             T.ToTensor()
         ])),
     ])
-    dataset_valid = SampleDataset(dataset_valid, 2)
+    dataset_valid = SampleDataset(dataset_valid, 10)
     dataloader_valid = DataLoader(dataset_valid, batch_size=args.batch_size, num_workers=args.num_workers)
 
     # Model
     # model = MattingBase(args.model_backbone)
     model = MattingRefine('resnet50', 0.25, 'full', 80_000, 0.7, 3)
-    weights = paddle.load(os.path.join(args.model_name, 'paddle_resnet50_last.pdparams'))
+    # weights = paddle.load(os.path.join(args.model_name, 'paddle_resnet50_last.pdparams'))
+    weights = paddle.load(os.path.join(args.model_name, 'stage1.pdparams'))
     model.load_dict(weights)
-    optimizer = paddle.optimizer.Adam(1e-5, parameters=model.parameters())
+    optimizer = paddle.optimizer.Adam(1e-4, parameters=model.parameters())
     scaler = GradScaler()
 
     # Logging and checkpoints
@@ -143,6 +148,9 @@ def train():
     # Run loop
     for epoch in range(args.epoch_start, args.epoch_end):
         for i, ((true_pha, true_fgr), true_bgr) in enumerate(tqdm(dataloader_train)):
+            # if i < 8998:
+            #     continue
+
             step = epoch * len(dataloader_train) + i
             # true_pha = true_pha
             # true_fgr = true_fgr
@@ -208,8 +216,9 @@ def train():
             if (step + 1) % args.checkpoint_interval == 0:
                 paddle.save(model.state_dict(), f'{args.model_name}/epoch-{epoch}-iter-{step}.pdparams')
 
-            paddle.save(model.state_dict(), f'{args.model_name}/epoch-{epoch}.pdparams')
 
+            paddle.save(model.state_dict(), f'{args.model_name}/epoch-{epoch}.pdparams')
+        valid(model, dataloader_valid, epoch)
 
 def valid(model, dataloader, step):
     model.eval()
@@ -218,7 +227,7 @@ def valid(model, dataloader, step):
     metric_SAD = 0
     metric_MAD = 0
     metric_MSE = 0
-    with torch.no_grad():
+    with paddle.no_grad():
         for (true_pha, true_fgr), true_bgr in tqdm(dataloader):
             batch_size = true_pha.shape[0]
             #
@@ -235,15 +244,23 @@ def valid(model, dataloader, step):
             loss_total += loss.cpu().item() * batch_size
             loss_count += batch_size
 
-            metric_SAD += MetricSAD(pred_pha, true_pha).item()
-            metric_MAD += MetricMAD(pred_pha, true_pha).item()
-            metric_MSE += MetricMSE(pred_pha, true_pha).item()
+            # metric_SAD += MetricSAD(pred_pha, true_pha).item()
+            # metric_MAD += MetricMAD(pred_pha, true_pha).item()
+            # metric_MSE += MetricMSE(pred_pha, true_pha).item()
+            from eval import gen_trimap, BatchSAD, BatchMSE
+            img = true_pha[0][0].cpu().numpy()
+            trimap = gen_trimap(img)
+            mask_pha = paddle.to_tensor([trimap]).unsqueeze(1)
+
+            metric_SAD += BatchSAD(pred_pha, true_pha, mask_pha)
+            metric_MSE += BatchMSE(pred_pha, true_pha, mask_pha)
 
             del true_pha, true_fgr, true_src, true_bgr
             del pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm
 
     print(f'valid_loss: {loss_total / loss_count}, step: {step}')
-    print(f'valid MAD: {metric_MAD / loss_count}, SAD: {metric_SAD / loss_count}, MSE: {metric_MSE / loss_count}')
+    print(f'valid SAD: {metric_SAD / loss_count}, MSE: {metric_MSE / loss_count}')
+    # print(f'valid MAD: {metric_MAD / loss_count}, SAD: {metric_SAD / loss_count}, MSE: {metric_MSE / loss_count}')
     model.train()
 
 

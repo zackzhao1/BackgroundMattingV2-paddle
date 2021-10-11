@@ -20,7 +20,6 @@ args = parser.parse_args()
 args.batch_size = 1
 args.device = 'cuda:7'
 
-
 # --------------- Loading ---------------
 def eval():
     dataset_valid = ZipDataset([
@@ -47,7 +46,7 @@ def eval():
     pd_sad, pd_mse = paddle_valid(gen_data)
     # pt_sad, pt_mse = pytorch_valid(gen_data)
 
-    print('Compare with the official model!')
+    # print('Compare with the official model!')
     print(f'paddle output:  SAD: {pd_sad / len(gen_data)}, MSE: {pd_mse / len(gen_data)}')
     # print(f'pytorch output:  SAD: {pt_sad / len(gen_data)}, MSE: {pt_mse / len(gen_data)}')
 
@@ -56,7 +55,7 @@ def eval():
 def paddle_valid(dataloader):
     # model = MattingBase('resnet50')
     model = MattingRefine('resnet50', 0.25, 'sampling', 80_000, 0.7, 3)
-    weights = paddle.load(os.path.join(args.model_path, 'paddle_resnet50_last.pdparams'))
+    weights = paddle.load(os.path.join(args.model_path, 'stage2.pdparams'))
     model.load_dict(weights)
 
     model.eval()
@@ -151,7 +150,7 @@ def BatchSAD(pred, target, mask, scale=2):
     error_map = (pred - target).abs()
     batch_loss = (error_map.cpu() * (mask == 128)).reshape((B, -1)).sum(axis=-1)
     batch_loss = batch_loss / 1000.
-    return batch_loss.item()*scale
+    return batch_loss.sum().item()/B*scale
 
 
 def BatchMSE(pred, target, mask, scale=2):
@@ -163,7 +162,7 @@ def BatchMSE(pred, target, mask, scale=2):
     batch_loss = (error_map.pow(2).cpu() * (mask == 128)).reshape((B, -1)).sum(axis=-1)
     batch_loss = batch_loss / ((mask == 128).astype(float).reshape((B, -1)).sum(axis=-1) + 1.)
     batch_loss = batch_loss * 1000.
-    return batch_loss.item()*scale
+    return batch_loss.sum().item()/B*scale
 
 
 def BatchSAD_pt(pred, target, mask, scale=2):
