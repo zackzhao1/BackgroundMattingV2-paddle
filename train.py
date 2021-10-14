@@ -1,91 +1,61 @@
-"""
-Train MattingBase
+#encoding=utf8
+# Copyright (c) 2021 PaddlePaddle Authors. All Rights Reserved.
 
-You can download pretrained DeepLabV3 weights from <https://github.com/VainF/DeepLabV3Plus-Pytorch>
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-Example:
+#     http://www.apache.org/licenses/LICENSE-2.0
 
-    CUDA_VISIBLE_DEVICES=0 python train_base.py \
-        --dataset-name videomatte240k \
-        --model-backbone resnet50 \
-        --model-name mattingbase-resnet50-videomatte240k \
-        --model-pretrain-initialization "pretraining/best_deeplabv3_resnet50_voc_os16.pth" \
-        --epoch-end 8
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""
 
 import argparse
-# import kornia
 import paddle
 import os
-import random
-
-from torch import nn
-from paddle.nn import functional as F
 from paddle.amp import auto_cast, GradScaler
-# from torch.utils.tensorboard import SummaryWriter
 from paddle.io import DataLoader
-# from torchvision.utils import make_grid
 from tqdm import tqdm
 import paddle.vision.transforms as T
-from PIL import Image
 
-from utils.metric import *
-from utils.loss import base_compute_loss, refine_compute_loss
-from utils.data_path import DATA_PATH
 from dataset import ImagesDataset, ZipDataset, VideoDataset, SampleDataset
 from dataset import augmentation as A
 from dataset.augmentation import random_crop
 from model import MattingBase, MattingRefine
-
-# from model.utils import load_matched_state_dict
+from utils.metric import *
+from utils.loss import base_compute_loss, refine_compute_loss
+from utils.data_path import DATA_PATH
 
 
 # --------------- Arguments ---------------
-
-
 parser = argparse.ArgumentParser()
 # parser.add_argument('--dataset-name', type=str, required=True, choices=DATA_PATH.keys())
 parser.add_argument('--dataset-name', type=str, choices=DATA_PATH.keys())
-parser.add_argument('--model-backbone', type=str, choices=['resnet101', 'resnet50', 'mobilenetv2'])
-parser.add_argument('--model-name', type=str)
+parser.add_argument('--model-backbone', type=str, choices=['resnet101', 'resnet50', 'mobilenetv2'], default='resnet50')
+parser.add_argument('--model-name', type=str, default='./model/weights/')
 parser.add_argument('--model-pretrain-initialization', type=str, default=None)
 parser.add_argument('--model-last-checkpoint', type=str, default=None)
-parser.add_argument('--batch-size', type=int, default=8)
-parser.add_argument('--num-workers', type=int, default=16)
+parser.add_argument('--batch-size', type=int, default=2)
+parser.add_argument('--num-workers', type=int, default=32)
 parser.add_argument('--epoch-start', type=int, default=0)
 parser.add_argument('--epoch-end', type=int)
 parser.add_argument('--log-train-loss-interval', type=int, default=1000)
-parser.add_argument('--log-train-images-interval', type=int, default=2000)
-parser.add_argument('--log-valid-interval', type=int, default=5000)
-parser.add_argument('--checkpoint-interval', type=int, default=5000)
+parser.add_argument('--log-train-images-interval', type=int, default=1000)
+parser.add_argument('--log-valid-interval', type=int, default=1000)
+parser.add_argument('--checkpoint-interval', type=int, default=1000)
+parser.add_argument('--learning-rate', type=float, default=1e-4)
+parser.add_argument('--pretrain', type=str, default=None)
 args = parser.parse_args()
 
-args.log_train_loss_interval = 20
-# args.log_train_loss_interval = 100
-args.log_train_images_interval = 1000
-args.log_valid_interval = 1000
-args.checkpoint_interval = 1000
-
-
-
-
-args.dataset_name = 'videomatte240k'
-args.model_backbone = 'resnet50'
-args.model_name = '/home/sp/zhaojl/BackgroundMattingV2-master/model/PyTorch/'
-args.epoch_end = 1000
-args.batch_size = 2
-args.num_workers = 32
-# distributed_num_gpus = 2
 args.device = 'cuda:7'
-# distributed_num_gpus = torch.cuda.device_count()
-# assert args.batch_size % distributed_num_gpus == 0
 os.environ["CUDA_VISIBLE_DEVICES"] = args.device
 
 
 # --------------- Loading ---------------
-
-
 def train():
     # Training DataLoader
     dataset_train = ZipDataset([
@@ -135,9 +105,9 @@ def train():
     # model = MattingBase(args.model_backbone)
     model = MattingRefine('resnet50', 0.25, 'full', 80_000, 0.7, 3)
     # weights = paddle.load(os.path.join(args.model_name, 'paddle_resnet50_last.pdparams'))
-    weights = paddle.load(os.path.join(args.model_name, 'stage1.pdparams'))
+    weights = paddle.load(os.path.join(args.model_name, args.pretrain))
     model.load_dict(weights)
-    optimizer = paddle.optimizer.Adam(1e-4, parameters=model.parameters())
+    optimizer = paddle.optimizer.Adam(args.learning_rate, parameters=model.parameters())
     scaler = GradScaler()
 
     # Logging and checkpoints
@@ -148,13 +118,7 @@ def train():
     # Run loop
     for epoch in range(args.epoch_start, args.epoch_end):
         for i, ((true_pha, true_fgr), true_bgr) in enumerate(tqdm(dataloader_train)):
-            # if i < 8998:
-            #     continue
-
             step = epoch * len(dataloader_train) + i
-            # true_pha = true_pha
-            # true_fgr = true_fgr
-            # true_bgr = true_bgr
             true_pha, true_fgr, true_bgr = random_crop(true_pha, true_fgr, true_bgr)
             true_src = true_bgr.clone()
 
@@ -170,26 +134,26 @@ def train():
 
             # Composite foreground onto source
             true_src = true_fgr * true_pha + true_src * (1 - true_pha)
+
+            # # Augment with noise
+            # aug_noise_idx = torch.rand(len(true_src)) < 0.4
+            # if aug_noise_idx.any():
+            #     true_src[aug_noise_idx] = true_src[aug_noise_idx].add_(torch.randn_like(true_src[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
+            #     true_bgr[aug_noise_idx] = true_bgr[aug_noise_idx].add_(torch.randn_like(true_bgr[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
+            # del aug_noise_idx
             #
-            #             # Augment with noise
-            #             aug_noise_idx = torch.rand(len(true_src)) < 0.4
-            #             if aug_noise_idx.any():
-            #                 true_src[aug_noise_idx] = true_src[aug_noise_idx].add_(torch.randn_like(true_src[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
-            #                 true_bgr[aug_noise_idx] = true_bgr[aug_noise_idx].add_(torch.randn_like(true_bgr[aug_noise_idx]).mul_(0.03 * random.random())).clamp_(0, 1)
-            #             del aug_noise_idx
+            # # Augment background with jitter
+            # aug_jitter_idx = torch.rand(len(true_src)) < 0.8
+            # if aug_jitter_idx.any():
+            #     true_bgr[aug_jitter_idx] = kornia.augmentation.ColorJitter(0.18, 0.18, 0.18, 0.1)(true_bgr[aug_jitter_idx])
+            # del aug_jitter_idx
             #
-            #             # Augment background with jitter
-            #             aug_jitter_idx = torch.rand(len(true_src)) < 0.8
-            #             if aug_jitter_idx.any():
-            #                 true_bgr[aug_jitter_idx] = kornia.augmentation.ColorJitter(0.18, 0.18, 0.18, 0.1)(true_bgr[aug_jitter_idx])
-            #             del aug_jitter_idx
-            #
-            #             # Augment background with affine
-            #             aug_affine_idx = torch.rand(len(true_bgr)) < 0.3
-            #             if aug_affine_idx.any():
-            #                 true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(true_bgr[aug_affine_idx])
-            #             del aug_affine_idx
-            # #
+            # # Augment background with affine
+            # aug_affine_idx = torch.rand(len(true_bgr)) < 0.3
+            # if aug_affine_idx.any():
+            #     true_bgr[aug_affine_idx] = T.RandomAffine(degrees=(-1, 1), translate=(0.01, 0.01))(true_bgr[aug_affine_idx])
+            # del aug_affine_idx
+
 
             with auto_cast():
                 # pred_pha, pred_fgr, pred_err = model(true_src, true_bgr)[:3]
@@ -202,13 +166,13 @@ def train():
             scaler.minimize(optimizer, scaled)
             optimizer.clear_grad()
 
-            if (i + 1) % args.log_train_loss_interval == 0:
-                print(f'step:{step} loss:{loss.item()}')
-
             # del true_pha, true_fgr, true_bgr
             # del pred_pha, pred_fgr, pred_err
             del true_pha, true_fgr, true_src, true_bgr
             del pred_pha, pred_fgr, pred_pha_sm, pred_fgr_sm, pred_err_sm
+
+            if (i + 1) % args.log_train_loss_interval == 0:
+                print(f'step:{step} loss:{loss.item()}')
 
             if (i + 1) % args.log_valid_interval == 0:
                 valid(model, dataloader_valid, step)
@@ -216,24 +180,19 @@ def train():
             if (step + 1) % args.checkpoint_interval == 0:
                 paddle.save(model.state_dict(), f'{args.model_name}/epoch-{epoch}-iter-{step}.pdparams')
 
-
             paddle.save(model.state_dict(), f'{args.model_name}/epoch-{epoch}.pdparams')
         valid(model, dataloader_valid, epoch)
+
 
 def valid(model, dataloader, step):
     model.eval()
     loss_total = 0
     loss_count = 0
     metric_SAD = 0
-    metric_MAD = 0
     metric_MSE = 0
     with paddle.no_grad():
         for (true_pha, true_fgr), true_bgr in tqdm(dataloader):
             batch_size = true_pha.shape[0]
-            #
-            # true_pha = true_pha
-            # true_fgr = true_fgr
-            # true_bgr = true_bgr
             true_src = true_pha * true_fgr + (1 - true_pha) * true_bgr
 
             # pred_pha, pred_fgr, pred_err = model(true_src, true_bgr)[:3]
@@ -244,9 +203,6 @@ def valid(model, dataloader, step):
             loss_total += loss.cpu().item() * batch_size
             loss_count += batch_size
 
-            # metric_SAD += MetricSAD(pred_pha, true_pha).item()
-            # metric_MAD += MetricMAD(pred_pha, true_pha).item()
-            # metric_MSE += MetricMSE(pred_pha, true_pha).item()
             from eval import gen_trimap, BatchSAD, BatchMSE
             img = true_pha[0][0].cpu().numpy()
             trimap = gen_trimap(img)
@@ -260,7 +216,6 @@ def valid(model, dataloader, step):
 
     print(f'valid_loss: {loss_total / loss_count}, step: {step}')
     print(f'valid SAD: {metric_SAD / loss_count}, MSE: {metric_MSE / loss_count}')
-    # print(f'valid MAD: {metric_MAD / loss_count}, SAD: {metric_SAD / loss_count}, MSE: {metric_MSE / loss_count}')
     model.train()
 
 
